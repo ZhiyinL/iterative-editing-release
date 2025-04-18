@@ -41,7 +41,6 @@ from mdm.utils.rotation_conversions import axis_angle_to_matrix, matrix_to_rotat
 from lib.dataset.preprocess import Normalizer
 import pickle
 import pose_mask
-import kinematic_tree
 
 ALL_VIBE_DBS = [
     'amass', 'amass_hml', '3dpw', 'h36m', 'nemomocap', 'nemomocap2'
