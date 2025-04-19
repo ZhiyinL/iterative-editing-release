@@ -339,8 +339,8 @@ class GaussianDiffusion:
                 q_sample_inpaint = inpaint_image
                 model_output =  (model_output * ~inpainting_mask) + (q_sample_inpaint * inpainting_mask) 
             '''
-            #inpaint_motion_noise = self.q_sample(inpainted_motion.clone(), t - 1) if (t[0] > 0) else inpainted_motion #model_output
-            #model_output = inpaint_motion_noise * inpainting_mask + (~ inpainting_mask) * model_output
+            # inpaint_motion_noise = self.q_sample(inpainted_motion.clone(), t - 1) if (t[0] > 0) else inpainted_motion #model_output
+            # model_output = inpaint_motion_noise * inpainting_mask + (~ inpainting_mask) * model_output
 
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
             assert model_output.shape == (B, C * 2, *x.shape[2:])
@@ -753,7 +753,7 @@ class GaussianDiffusion:
                 if thresh == 0:
                     ratio = 1
             skip = False
-            if t[0] > thresh:
+            if True or t[0] > thresh: # always use ratio = 1 to avoid blending
                 ratio = 1
             else:
                 ratio = t[0] / thresh

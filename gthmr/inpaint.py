@@ -159,5 +159,6 @@ smpl_joints_condition = smpl_joints_condition.cpu().numpy()
 smpl_joints = smpl_joints.cpu().numpy()
 
 # np.save("noisetest.npy", np.concatenate([smpl_joints_condition, smpl_joints], axis=0))
-np.save(os.path.join(args.output_dir, "results.npy"),
+np.save(os.path.join(args.output_dir, "results_tinyviz.npy"),
         np.concatenate([smpl_joints_condition, smpl_joints], axis=0))
+np.save(os.path.join(args.output_dir, "results.npy"), smpl_joints)
