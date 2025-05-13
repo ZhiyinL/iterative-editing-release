@@ -8,7 +8,7 @@ import argparse
 import json
 import numpy as np
 import torch
-from gthmr.emp_train.training_loop import TrainLoop
+# from gthmr.emp_train.training_loop import TrainLoop
 from mdm.utils.parser_util import generate_args, train_args, train_emp_args
 from mdm.utils.model_util import create_model_and_diffusion, load_model_wo_clip
 from mdm.utils import dist_util
@@ -16,7 +16,6 @@ from mdm.model.cfg_sampler import ClassifierFreeSampleModel
 from gthmr.emp_train.get_data import get_dataset_loader
 from mdm.data_loaders.humanml.scripts.motion_process import recover_from_ric
 import mdm.data_loaders.humanml.utils.paramUtil as paramUtil
-from mdm.data_loaders.humanml.utils.plot_script import plot_3d_motion
 from mdm.utils.model_util import create_emp_model_and_diffusion
 import shutil
 from mdm.data_loaders.tensors import collate
@@ -43,6 +42,9 @@ extra_parser = argparse.ArgumentParser(add_help=False)
 extra_parser.add_argument('--input_motion_path', type=str,
                             default='/home/zhiyin/tml-fencing/OUTPUT.npy',
                             help="Path to the input motion numpy file.")
+extra_parser.add_argument('--mask_path', type=str,
+                            default='/home/zhiyin/tml-fencing/MASK.npy',
+                            help="Path to the input mask numpy file.")
 extra_parser.add_argument('--output_dir', type=str,
                             default='/home/zhiyin/iterative-editing-release/',
                             help="Directory to save the output motion.")
@@ -50,8 +52,21 @@ extra_args, remaining_argv = extra_parser.parse_known_args()
 sys.argv = [sys.argv[0]] + remaining_argv
 args = train_emp_args()
 args.input_motion_path = extra_args.input_motion_path
+args.mask_path = extra_args.mask_path
 args.output_dir = extra_args.output_dir
 fixseed(args.seed  + 1)
+out_path = args.output_dir
+name = os.path.basename(os.path.dirname(args.model_path))
+niter = os.path.basename(args.model_path).replace('model', '').replace('.pt', '')
+fps = 30
+
+dist_util.setup_dist(args.device)
+if out_path == '':
+    out_path = os.path.join(os.path.dirname(args.model_path),
+                            'edit_{}_{}_{}_seed{}'.format(name, niter, "in_between", args.seed))
+else:
+    out_path = os.path.join(out_path, 'edit_{}_{}_{}_seed{}'.format(name, niter, "in_between", args.seed))
+
 device = 'cuda'
 path_model_args = os.path.join(os.path.dirname(args.model_path), "args.json")
 if not os.path.exists(path_model_args):
@@ -79,8 +94,11 @@ model.rot2xyz.smpl_model.eval()
 print(f"Loading checkpoints from [{args.model_path}]...")
 state_dict = torch.load(args.model_path)
 load_model_wo_clip(model, state_dict)
+start_motion = torch.tensor(np.load(args.input_motion_path))#[..., :70]
+
 num_samples =  1
-max_frames = 60
+max_frames = start_motion.shape[-1]
+print("Input motion shape: ", start_motion.shape, "with max frames: ", max_frames)
 args.batch_size = num_samples
 data = get_dataset_loader(name=args_pretrained_model.dataset,
                                   batch_size=num_samples,
@@ -94,20 +112,27 @@ data = get_dataset_loader(name=args_pretrained_model.dataset,
 iterator = iter(data)
 sample, model_kwargs = next(iterator) # never use input_motions 
 
-start_motion = torch.tensor(np.load(args.input_motion_path))[..., :60]
 start_motion_clone = start_motion.clone()
 start_motion = reload(model, start_motion)
 
 model_kwargs["y"]["inpainting_mask"] = torch.ones( start_motion.shape )
-# ( BATCH_SIZE, 236, 1, 60) = > BATCH_SIZE x POSE_DIM x 1 x NUM_FRAMES
-model_kwargs["y"]["inpainting_mask"][..., 20:40] = 0
+if args.mask_path: # Load the mask if provided
+
+    mask_np = np.load(args.mask_path)
+    assert mask_np.shape == (max_frames,), \
+        f"Mask shape {mask_np.shape} != input frames {(max_frames, )}"
+    mask_t = torch.tensor(mask_np, dtype=torch.bool, device=start_motion.device)
+    model_kwargs["y"]["inpainting_mask"][..., :] = mask_t
+else:
+    # ( BATCH_SIZE, 236, 1, 60) = > BATCH_SIZE x POSE_DIM x 1 x NUM_FRAMES
+    model_kwargs["y"]["inpainting_mask"][..., 20:40] = 0
 
 model_kwargs["y"]["inpainted_motion"] = start_motion
 
 
 gt_sample = sample.clone()
 N = sample.shape[0]
-T = 60 # TODO: this could only handle 60 frames
+T = max_frames # TODO: this could only handle 60 frames
 
 sample = sample.to(dist_util.dev())
 
@@ -159,6 +184,37 @@ smpl_joints_condition = smpl_joints_condition.cpu().numpy()
 smpl_joints = smpl_joints.cpu().numpy()
 
 # np.save("noisetest.npy", np.concatenate([smpl_joints_condition, smpl_joints], axis=0))
-np.save(os.path.join(args.output_dir, "results_tinyviz.npy"),
+if os.path.exists(out_path):
+    shutil.rmtree(out_path)
+os.makedirs(out_path)
+np.save(os.path.join(out_path, 'results.npy'), smpl_joints)
+np.save(os.path.join(out_path, "results_tinyviz.npy"),
         np.concatenate([smpl_joints_condition, smpl_joints], axis=0))
-np.save(os.path.join(args.output_dir, "results.npy"), smpl_joints)
+
+# visualization
+import sys, os
+repo_root = "/home/zhiyin/motion-diffusion-model"
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)      # ← inserted in front of existing paths
+from data_loaders.humanml.utils.plot_script import plot_3d_motion
+
+print(f"saving visualizations to [{out_path}]...")
+save_file = 'samples_{:02d}_to_{:02d}.mp4'.format(0, 0)
+animation_save_path = os.path.join(out_path, save_file)
+t2m_kinematic_chain = [[0, 2, 5, 8, 11], [0, 1, 4, 7, 10], [0, 3, 6, 9, 12, 15], [9, 14, 17, 19, 21], [9, 13, 16, 18, 20]]
+skeleton = t2m_kinematic_chain
+motion = smpl_joints[0]
+caption = 'Edit [{}] unconditioned'.format("in_between")
+gt_frames = list(range(0, 20)) + list(range(40, 70))
+
+animation = plot_3d_motion(animation_save_path, 
+                            skeleton, motion, dataset=args.dataset, title=caption, 
+                            fps=fps, gt_frames=gt_frames,
+                            global_coords=True)
+animation.write_videofile(
+    animation_save_path,
+    fps=fps,          # mandatory for raw VideoClip objects
+    codec="libx264",  # good default (H.264)
+    preset="medium",  # faster→"fast"/"ultrafast", smaller file→"slow"
+    logger=None       # drop this line if you want ffmpeg progress messages
+)
