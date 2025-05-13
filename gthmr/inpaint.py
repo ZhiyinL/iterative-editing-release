@@ -117,7 +117,6 @@ start_motion = reload(model, start_motion)
 
 model_kwargs["y"]["inpainting_mask"] = torch.ones( start_motion.shape )
 if args.mask_path: # Load the mask if provided
-
     mask_np = np.load(args.mask_path)
     assert mask_np.shape == (max_frames,), \
         f"Mask shape {mask_np.shape} != input frames {(max_frames, )}"
@@ -205,7 +204,10 @@ t2m_kinematic_chain = [[0, 2, 5, 8, 11], [0, 1, 4, 7, 10], [0, 3, 6, 9, 12, 15],
 skeleton = t2m_kinematic_chain
 motion = smpl_joints[0]
 caption = 'Edit [{}] unconditioned'.format("in_between")
-gt_frames = list(range(0, 20)) + list(range(40, 70))
+if args.mask_path:
+    gt_frames = np.where(mask_np == 1)[0].tolist()
+else:
+    gt_frames = list(range(0, 20)) + list(range(40, T))
 
 animation = plot_3d_motion(animation_save_path, 
                             skeleton, motion, dataset=args.dataset, title=caption, 
