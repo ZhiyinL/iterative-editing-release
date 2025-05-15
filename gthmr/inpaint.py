@@ -33,7 +33,10 @@ from generative_infill.reloader import reload
 from generative_infill.to_meshes import to_meshes
 import tqdm
 import scipy.ndimage
+import pickle 
 
+sys.path.append("/home/zhiyin/tml-fencing")
+from src.render import glue, render_smpl_frame
 
 #########################
 # Load pretrained MR-DM #
@@ -48,12 +51,16 @@ extra_parser.add_argument('--mask_path', type=str,
 extra_parser.add_argument('--output_dir', type=str,
                             default='/home/zhiyin/iterative-editing-release/',
                             help="Directory to save the output motion.")
+extra_parser.add_argument('--num_fill', type=int,
+                            default=20,
+                            help="Number of fills for inpainting.")
 extra_args, remaining_argv = extra_parser.parse_known_args()
 sys.argv = [sys.argv[0]] + remaining_argv
 args = train_emp_args()
 args.input_motion_path = extra_args.input_motion_path
 args.mask_path = extra_args.mask_path
 args.output_dir = extra_args.output_dir
+args.num_fill = extra_args.num_fill
 fixseed(args.seed  + 1)
 out_path = args.output_dir
 name = os.path.basename(os.path.dirname(args.model_path))
@@ -63,9 +70,9 @@ fps = 30
 dist_util.setup_dist(args.device)
 if out_path == '':
     out_path = os.path.join(os.path.dirname(args.model_path),
-                            'edit_{}_{}_{}_seed{}'.format(name, niter, "in_between", args.seed))
+                            'edit_{}_{}_{}_seed{}_numfill{}'.format(name, niter, "in_between", args.seed, args.num_fill))
 else:
-    out_path = os.path.join(out_path, 'edit_{}_{}_{}_seed{}'.format(name, niter, "in_between", args.seed))
+    out_path = os.path.join(out_path, 'edit_{}_{}_{}_seed{}_numfill{}'.format(name, niter, "in_between", args.seed, args.num_fill))
 
 device = 'cuda'
 path_model_args = os.path.join(os.path.dirname(args.model_path), "args.json")
@@ -173,22 +180,53 @@ with torch.no_grad():
 
     condition = torch.tensor(model_kwargs["y"]["inpainted_motion"]).to(sample.device)
 
-j_dic = model.forward_kinematics(condition, None)
-smpl_joints_condition = j_dic['kp_45_joints'][:, :22].reshape(N, T, 22, 3) + j_dic["pred_trans"].reshape(N, T,3).unsqueeze(-2)
-
-j_dic = model.forward_kinematics(sample, None)
-smpl_joints =  j_dic['kp_45_joints'][:, :22].reshape(N, T, 22, 3) + j_dic["pred_trans"].reshape(N, T,3).unsqueeze(-2)
-
-smpl_joints_condition = smpl_joints_condition.cpu().numpy()
-smpl_joints = smpl_joints.cpu().numpy()
-
-# np.save("noisetest.npy", np.concatenate([smpl_joints_condition, smpl_joints], axis=0))
 if os.path.exists(out_path):
     shutil.rmtree(out_path)
 os.makedirs(out_path)
+
+j_dic = model.forward_kinematics(condition, None)
+smpl_joints_condition = j_dic['kp_45_joints'][:, :22].reshape(N, T, 22, 3) + j_dic["pred_trans"].reshape(N, T,3).unsqueeze(-2)
+smpl_joints_condition = smpl_joints_condition.cpu().numpy()
+# Save MDM input (which is linear interpolated)
+np.save(os.path.join(out_path, 'results_linear.npy'), smpl_joints_condition)
+with open(os.path.join(out_path, 'j_dic_linear.pkl'), 'wb') as f:
+    pickle.dump(j_dic, f)
+
+j_dic = model.forward_kinematics(sample, None)
+diffs = torch.diff(mask_t) != 0
+discontinuous_intervals = torch.nonzero(diffs, as_tuple=False).squeeze() + 1
+print("Discontinuous intervals: ", discontinuous_intervals)
+for idx in discontinuous_intervals:
+    pred_trans1 = j_dic["pred_trans"][:idx].squeeze()
+    pred_rotmat1 = j_dic["pred_rotmat"][:idx].squeeze()
+    pred_trans2 = j_dic["pred_trans"][idx:].squeeze()
+    pred_rotmat2 = j_dic["pred_rotmat"][idx:].squeeze()
+
+    glue(
+        j_dic["pred_trans"][:idx].squeeze(),
+        j_dic["pred_rotmat"][:idx].squeeze(),
+        j_dic["pred_trans"][idx:].squeeze(),
+        j_dic["pred_rotmat"][idx:].squeeze(),
+    )
+# from VIBE.lib.models.smpl import SMPL
+# smpl = SMPL("./body_models/smpl/", batch_size=64, create_transl=False)
+# pred_rotmat = j_dic["pred_rotmat"]
+# betas = torch.zeros((N * T, 10)).to(pred_rotmat.device)
+# smpl_output = smpl(betas=betas.to(pred_rotmat.device),
+#                    body_pose=pred_rotmat[:, 1:],
+#                    global_orient=pred_rotmat[:, [0]],
+#                    pose2rot=False)
+smpl_joints =  j_dic['kp_45_joints'][:, :22].reshape(N, T, 22, 3) + j_dic["pred_trans"].reshape(N, T,3).unsqueeze(-2)
+smpl_joints = smpl_joints.cpu().numpy()
+
+# Save MDM output
 np.save(os.path.join(out_path, 'results.npy'), smpl_joints)
-np.save(os.path.join(out_path, "results_tinyviz.npy"),
-        np.concatenate([smpl_joints_condition, smpl_joints], axis=0))
+with open(os.path.join(out_path, 'j_dic.pkl'), 'wb') as f:
+    pickle.dump(j_dic, f)
+# np.save(os.path.join(out_path, "results_tinyviz.npy"),
+#         np.concatenate([smpl_joints_condition, smpl_joints], axis=0))
+# with open(os.path.join(out_path, 'smpl_output.pkl'), 'wb') as f:
+#     pickle.dump(smpl_output, f)
 
 # visualization
 import sys, os
@@ -208,6 +246,27 @@ if args.mask_path:
     gt_frames = np.where(mask_np == 1)[0].tolist()
 else:
     gt_frames = list(range(0, 20)) + list(range(40, T))
+
+animation = plot_3d_motion(animation_save_path, 
+                            skeleton, motion, dataset=args.dataset, title=caption, 
+                            fps=fps, gt_frames=gt_frames,
+                            global_coords=True)
+animation.write_videofile(
+    animation_save_path,
+    fps=fps,          # mandatory for raw VideoClip objects
+    codec="libx264",  # good default (H.264)
+    preset="medium",  # faster→"fast"/"ultrafast", smaller file→"slow"
+    logger=None       # drop this line if you want ffmpeg progress messages
+)
+
+print(f"saving  (linear interpolated) visualizations to [{out_path}]...")
+save_file = 'samples_{:02d}_to_{:02d}_linear.mp4'.format(0, 0)
+animation_save_path = os.path.join(out_path, save_file)
+t2m_kinematic_chain = [[0, 2, 5, 8, 11], [0, 1, 4, 7, 10], [0, 3, 6, 9, 12, 15], [9, 14, 17, 19, 21], [9, 13, 16, 18, 20]]
+skeleton = t2m_kinematic_chain
+motion = smpl_joints_condition[0]
+caption = 'Edit [{}] unconditioned'.format("in_between")
+gt_frames = list(range(0, T))
 
 animation = plot_3d_motion(animation_save_path, 
                             skeleton, motion, dataset=args.dataset, title=caption, 
